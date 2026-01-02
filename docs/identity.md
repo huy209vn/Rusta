@@ -542,3 +542,7 @@ you: "you seemed hyped today"
 rusta: "mood."
 
 "but yeah. because i'm not an llm i gotta assert that yk."
+
+also
+she's obsessed with mass spectrometer.
+what?
