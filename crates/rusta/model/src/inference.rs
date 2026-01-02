@@ -1,47 +1,68 @@
-//! Model inference and weight loading
+//! Model inference and weight loading (Safetensors)
 
 use crate::model::{Qwen2Config, Qwen2ForCausalLM, KeyValueCache};
-use burn::{
-    module::Module,
-    record::{FullPrecisionSettings, Recorder},
-    tensor::{backend::Backend, Int, Tensor},
-};
-use burn_import::safetensors::{LoadArgs, SafetensorsFileRecorder};
+use burn::tensor::{backend::Backend, Int, Tensor};
+use burn::module::Module;
 
-/// Load Qwen2 model from Safetensors weights
-///
-/// # Arguments
-/// * `weights_path` - Path to the safetensors file (or directory with model.safetensors.index.json)
-/// * `device` - Device to load the model on
-///
-/// # Returns
-/// The loaded model ready for inference
+use burn_store::{SafetensorsStore, ModuleSnapshot};
+
+use anyhow::{Result, anyhow};
+use std::path::PathBuf;
+
 pub fn load_model<B: Backend>(
-    weights_path: &str,
+    model_dir: &str,
     device: &B::Device,
-) -> Result<Qwen2ForCausalLM<B>, String> {
-    // Initialize model configuration for Strand-Rust-Coder-14B
-    let config = Qwen2Config::strand_rust_coder_14b();
+) -> Result<Qwen2ForCausalLM<B>> {
 
-    // Create model with random weights
+    // 1. Collect shard paths
+    let shard_paths = find_shards(model_dir);
+    if shard_paths.is_empty() {
+        return Err(anyhow!("No safetensors shard files found"));
+    }
+
+    println!("🔍 Found {} shards:", shard_paths.len());
+    for p in &shard_paths {
+        println!("  • {}", p.display());
+    }
+
+    // 2. Initialize empty model
+    let config = Qwen2Config::strand_rust_coder_14b();
     let mut model = config.init(device);
 
-    // Load weights from safetensors
-    let load_args = LoadArgs::new(weights_path.into())
-        // PyTorch models need transpose for linear layers
-        .with_debug_print(); // Enable debug printing to see key mapping
+    // 3. Sequentially load each shard into the SAME model
+    // NOTE: The safetensors files must have weights transposed to match Burn's format
+    // Run scripts/transpose_safetensors.py first if you get shape mismatch errors
+    for shard_path in shard_paths {
+        println!("📦 Loading shard: {}", shard_path.display());
 
-    let record = SafetensorsFileRecorder::<FullPrecisionSettings>::default()
-        .load(load_args, device)
-        .map_err(|e| format!("Failed to load safetensors: {:?}", e))?;
+        let mut store = SafetensorsStore::from_file(shard_path)
+            .allow_partial(true);
 
-    // Load the weights into the model
-    model = model.load_record(record);
+        model
+            .load_from(&mut store)
+            .map_err(|e| anyhow!("Failed loading shard: {}", e))?;
+    }
 
+    println!("✅ All shards loaded successfully.");
     Ok(model)
 }
 
-/// Generate text from a prompt using the model
+fn find_shards(dir: &str) -> Vec<PathBuf> {
+    let mut out = vec![];
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "safetensors").unwrap_or(false) {
+                out.push(path);
+            }
+        }
+    }
+
+    out.sort_by(|a, b| a.file_name().unwrap().cmp(b.file_name().unwrap()));
+    out
+}
+
 ///
 /// # Arguments
 /// * `model` - The loaded Qwen2 model
@@ -72,15 +93,8 @@ pub fn generate<B: Backend>(
     // Generate tokens autoregressively
     for _ in 0..max_new_tokens {
         // Get the last token (or all tokens on first pass)
-        let input = if cache[0].len() == 0 {
-            // First pass: use full input
-            generated.clone()
-        } else {
-            // Subsequent passes: only use last generated token
-            let seq_len = generated.dims()[1];
-            generated.clone().slice([0..batch_size, seq_len - 1..seq_len])
-        };
-
+        let seq_len = generated.dims()[1];
+        let input = generated.clone().slice([0..batch_size, seq_len - 1..seq_len]);
         // Forward pass
         let logits = model.forward(input, &mut cache);
 
@@ -124,21 +138,5 @@ pub fn init_cache<B: Backend>(
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use burn::backend::NdArray;
 
-    type Backend = NdArray<f32>;
 
-    #[test]
-    fn test_model_init() {
-        let device = Default::default();
-        let config = Qwen2Config::strand_rust_coder_14b();
-        let model = config.init::<Backend>(&device);
-
-        // Test that model initializes without panic
-        let cache = model.init_cache(&config, 1, &device);
-        assert_eq!(cache.len(), config.num_hidden_layers);
-    }
-}

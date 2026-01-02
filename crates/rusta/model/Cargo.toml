@@ -12,8 +12,12 @@ thiserror.workspace = true
 tracing.workspace = true
 
 # Burn deep learning framework
-burn = { version = "0.19.0", features = ["train", "std"] }
-burn-import = { version = "0.19.0", features = ["pytorch"] }
-
-# For converting PyTorch/safetensors weights
+burn = { version = "0.19.1", features = ["train", "std", "cuda"] }
+burn-cuda = { version = "0.19.1" }
+burn-store = { version = "0.19.1" }
+burn-import = {version ="0.19.1",features =["safetensors"]}
+# For loading safetensors weights manually
 safetensors = "0.4"
+
+# Tokenizer
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
